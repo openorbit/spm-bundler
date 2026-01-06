@@ -36,6 +36,12 @@ Bundle fields:
 - Codesigning is skipped if `signing.enabled` is false, `identity` is empty, or `--skip-sign` is supplied.
 - Frameworks/resources are copied as-is; provide pre-signed frameworks if required by your workflow.
 
+## Ad-hoc / local signing
+
+- Ad-hoc: set `signing.identity` to `"-"`; no entitlements required for macOS ad-hoc signing.
+- Local/self-signed: create a certificate in your login keychain and reference its Common Name in `signing.identity`.
+- Assembly only: pass `--skip-sign` or set `signing.enabled` to `false` to leave signatures untouched.
+
 ## Example
 
 - Copy `spm-bundler.json.example` to `.spm-bundler.json`, update product names/paths/identities, then run:
