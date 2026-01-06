@@ -77,13 +77,14 @@ struct BundlerCore {
             try fileManager.removeItem(at: bundleURL)
         }
 
-        let executableURL = try resolveBinary(
+        let resolvedBinary = try resolveBinary(
             for: spec,
             configuration: configuration,
             packageDirectory: packageDirectory,
             buildSystem: buildSystem,
             options: options
         )
+        let executableURL = resolvedBinary.url
 
         switch spec.platform {
         case .macOS:
@@ -91,6 +92,7 @@ struct BundlerCore {
                 spec: spec,
                 executableURL: executableURL,
                 bundleURL: bundleURL,
+                buildOutputDirectory: resolvedBinary.buildOutputDirectory,
                 packageDirectory: packageDirectory,
                 options: options
             )
@@ -99,6 +101,7 @@ struct BundlerCore {
                 spec: spec,
                 executableURL: executableURL,
                 bundleURL: bundleURL,
+                buildOutputDirectory: resolvedBinary.buildOutputDirectory,
                 packageDirectory: packageDirectory,
                 options: options
             )
@@ -117,6 +120,7 @@ struct BundlerCore {
         spec: BundleSpec,
         executableURL: URL,
         bundleURL: URL,
+        buildOutputDirectory: URL?,
         packageDirectory: URL,
         options: Options
     ) throws {
@@ -134,7 +138,7 @@ struct BundlerCore {
         try copyReplacingItem(at: executableURL, to: executableDestination)
         try makeExecutable(at: executableDestination)
 
-        try copyFrameworks(spec.frameworks, to: frameworksDir, packageDirectory: packageDirectory, options: options)
+        try copyFrameworks(spec.frameworks, to: frameworksDir, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory, options: options)
         try copyResources(spec.resources, to: resourcesDir, packageDirectory: packageDirectory, options: options)
         try ensureRPath(executableURL: executableDestination, rpath: "@executable_path/../Frameworks", options: options)
 
@@ -153,6 +157,7 @@ struct BundlerCore {
         spec: BundleSpec,
         executableURL: URL,
         bundleURL: URL,
+        buildOutputDirectory: URL?,
         packageDirectory: URL,
         options: Options
     ) throws {
@@ -168,7 +173,7 @@ struct BundlerCore {
         try copyReplacingItem(at: executableURL, to: executableDestination)
         try makeExecutable(at: executableDestination)
 
-        try copyFrameworks(spec.frameworks, to: frameworksDir, packageDirectory: packageDirectory, options: options)
+        try copyFrameworks(spec.frameworks, to: frameworksDir, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory, options: options)
         try copyResources(spec.resources, to: resourcesDir, packageDirectory: packageDirectory, options: options)
 
         let infoPlistPath = spec.infoPlist.flatMap { absolutePath(for: $0, relativeTo: packageDirectory) }
@@ -218,9 +223,10 @@ struct BundlerCore {
         packageDirectory: URL,
         buildSystem: BuildSystem,
         options: Options
-    ) throws -> URL {
+    ) throws -> ResolvedBinary {
         if let provided = spec.binaryPath {
-            return absolutePath(for: provided, relativeTo: packageDirectory)
+            let providedURL = absolutePath(for: provided, relativeTo: packageDirectory)
+            return ResolvedBinary(url: providedURL, buildOutputDirectory: providedURL.deletingLastPathComponent())
         }
 
         switch buildSystem {
@@ -248,7 +254,7 @@ struct BundlerCore {
         configuration: String,
         packageDirectory: URL,
         options: Options
-    ) throws -> URL {
+    ) throws -> ResolvedBinary {
         log("Building \(product) (\(configuration)) via swift build", verboseOnly: false, options: options)
         let result = try runProcess(
             arguments: [
@@ -269,25 +275,28 @@ struct BundlerCore {
             throw BundlerError.buildFailed("Unable to locate build output path for \(product)")
         }
 
-        let binary = URL(fileURLWithPath: binPath).appendingPathComponent(product)
+        let binDir = URL(fileURLWithPath: binPath)
+        let binary = binDir.appendingPathComponent(product)
         guard FileManager.default.fileExists(atPath: binary.path) else {
             throw BundlerError.buildFailed("Built product not found at \(binary.path)")
         }
 
-        return binary
+        return ResolvedBinary(url: binary, buildOutputDirectory: binDir)
     }
 
     private func copyFrameworks(
         _ frameworks: [String]?,
         to destination: URL,
         packageDirectory: URL,
+        buildOutputDirectory: URL?,
         options: Options
     ) throws {
         guard let frameworks, !frameworks.isEmpty else { return }
         for framework in frameworks {
-            let source = absolutePath(for: framework, relativeTo: packageDirectory)
+            let source = resolveFrameworkPath(framework, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory)
             let target = destination.appendingPathComponent(source.lastPathComponent)
             try copyReplacingItem(at: source, to: target)
+            try setFrameworkInstallName(frameworkURL: target, options: options)
             log("Copied framework \(source.lastPathComponent)", verboseOnly: true, options: options)
         }
     }
@@ -463,6 +472,11 @@ struct ProcessResult {
     var errors: String
 }
 
+struct ResolvedBinary {
+    var url: URL
+    var buildOutputDirectory: URL?
+}
+
 enum BundlerError: Error, CustomStringConvertible {
     case configMissing(String)
     case configInvalid(String)
@@ -577,4 +591,70 @@ func removeExistingSignatures(at root: URL, options: Options) throws {
             purgeSignature(at: item)
         }
     }
+}
+
+// Resolve a framework path, inserting the build triple directory if needed.
+private func resolveFrameworkPath(_ path: String, packageDirectory: URL, buildOutputDirectory: URL?) -> URL {
+    let direct = absolutePath(for: path, relativeTo: packageDirectory)
+    if FileManager.default.fileExists(atPath: direct.path) {
+        return direct
+    }
+
+    guard let buildOutputDirectory else { return direct }
+
+    let binDir = buildOutputDirectory
+    let configDir = binDir.lastPathComponent // e.g., release
+    let tripleDir = binDir.deletingLastPathComponent().lastPathComponent // e.g., arm64-apple-macosx
+
+    // If the user gave ".build/release/Framework.framework", try inserting the triple.
+    let relative = path.hasPrefix("/") ? String(path.dropFirst()) : path
+    if relative.hasPrefix(".build/") {
+        let suffix = String(relative.dropFirst(".build/".count))
+        // Avoid duplicating the triple if the suffix already contains it.
+        if !suffix.hasPrefix("\(tripleDir)/") {
+            let candidate = packageDirectory
+                .appendingPathComponent(".build")
+                .appendingPathComponent(tripleDir)
+                .appendingPathComponent(suffix)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        // If suffix starts with the config (e.g., "release/Framework.framework"), try triple/config/suffixWithoutConfig
+        if suffix.hasPrefix("\(configDir)/") {
+            let remainder = String(suffix.dropFirst(configDir.count + 1))
+            let candidate = packageDirectory
+                .appendingPathComponent(".build")
+                .appendingPathComponent(tripleDir)
+                .appendingPathComponent(configDir)
+                .appendingPathComponent(remainder)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+    }
+
+    return direct
+}
+
+// Ensure the framework's install name points to @rpath so it resolves from the bundled Frameworks directory.
+private func setFrameworkInstallName(frameworkURL: URL, options: Options) throws {
+    let frameworkName = frameworkURL.deletingPathExtension().lastPathComponent
+    let binary = frameworkURL
+        .appendingPathComponent("Versions")
+        .appendingPathComponent("A")
+        .appendingPathComponent(frameworkName)
+
+    guard FileManager.default.fileExists(atPath: binary.path) else {
+        log("Framework binary missing at \(binary.path); skipping install_name_tool", verboseOnly: true, options: options)
+        return
+    }
+
+    let newID = "@rpath/\(frameworkURL.lastPathComponent)/Versions/A/\(frameworkName)"
+    log("Setting install_name for \(frameworkName) to \(newID)", verboseOnly: true, options: options)
+    _ = try runProcess(
+        arguments: ["install_name_tool", "-id", newID, binary.path],
+        workingDirectory: frameworkURL,
+        options: options
+    )
 }
