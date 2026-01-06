@@ -303,6 +303,7 @@ struct BundlerCore {
         }
     }
 
+    @discardableResult
     private func runProcess(arguments: [String], workingDirectory: URL, options: Options) throws -> ProcessResult {
         let process = Process()
         process.currentDirectoryURL = workingDirectory
