@@ -138,7 +138,12 @@ struct BundlerCore {
         try copyReplacingItem(at: executableURL, to: executableDestination)
         try makeExecutable(at: executableDestination)
 
-        try copyFrameworks(spec.frameworks, to: frameworksDir, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory, options: options)
+        try copyFrameworks(spec.frameworks,
+                           to: frameworksDir,
+                           packageDirectory: packageDirectory,
+                           buildOutputDirectory: buildOutputDirectory,
+                           signing: spec.signing,
+                           options: options)
         try copyResources(spec.resources, to: resourcesDir, packageDirectory: packageDirectory, options: options)
         try ensureRPath(executableURL: executableDestination, rpath: "@executable_path/../Frameworks", options: options)
 
@@ -173,7 +178,12 @@ struct BundlerCore {
         try copyReplacingItem(at: executableURL, to: executableDestination)
         try makeExecutable(at: executableDestination)
 
-        try copyFrameworks(spec.frameworks, to: frameworksDir, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory, options: options)
+        try copyFrameworks(spec.frameworks,
+                           to: frameworksDir,
+                           packageDirectory: packageDirectory,
+                           buildOutputDirectory: buildOutputDirectory,
+                           signing: spec.signing,
+                           options: options)
         try copyResources(spec.resources, to: resourcesDir, packageDirectory: packageDirectory, options: options)
 
         let infoPlistPath = spec.infoPlist.flatMap { absolutePath(for: $0, relativeTo: packageDirectory) }
@@ -289,14 +299,25 @@ struct BundlerCore {
         to destination: URL,
         packageDirectory: URL,
         buildOutputDirectory: URL?,
+        signing: SigningConfig?,
         options: Options
     ) throws {
         guard let frameworks, !frameworks.isEmpty else { return }
+        let signingEnabled = signing?.isEnabled ?? false
+        let identity = signing?.identity
         for framework in frameworks {
             let source = resolveFrameworkPath(framework, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory)
             let target = destination.appendingPathComponent(source.lastPathComponent)
             try copyReplacingItem(at: source, to: target)
             try setFrameworkInstallName(frameworkURL: target, options: options)
+            if signingEnabled, let identity, !identity.isEmpty {
+                try signFramework(at: target,
+                                  identity: identity,
+                                  entitlements: signing?.entitlements,
+                                  optionsFlags: signing?.options,
+                                  deep: signing?.deep ?? false,
+                                  options: options)
+            }
             log("Copied framework \(source.lastPathComponent)", verboseOnly: true, options: options)
         }
     }
@@ -321,6 +342,23 @@ struct BundlerCore {
             workingDirectory: frameworkURL,
             options: options
         )
+    }
+
+    /// Sign a copied framework so dyld will accept it after install_name_tool changes.
+    private func signFramework(at path: URL, identity: String, entitlements: String?, optionsFlags: [String]?, deep: Bool, options: Options) throws {
+        var args = ["codesign", "--force", "--sign", identity]
+        if let entitlements {
+            args += ["--entitlements", entitlements]
+        }
+        if let opts = optionsFlags, !opts.isEmpty {
+            args += ["--options", opts.joined(separator: ",")]
+        } else {
+            args += ["--options", "runtime"]
+        }
+        if deep { args.append("--deep") }
+        args.append(path.path)
+        log("Signing framework \(path.lastPathComponent) with identity \(identity)", verboseOnly: true, options: options)
+        try runProcess(arguments: args, workingDirectory: path.deletingLastPathComponent(), options: options)
     }
 
     private func copyResources(
