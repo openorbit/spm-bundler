@@ -136,6 +136,7 @@ struct BundlerCore {
 
         try copyFrameworks(spec.frameworks, to: frameworksDir, packageDirectory: packageDirectory, options: options)
         try copyResources(spec.resources, to: resourcesDir, packageDirectory: packageDirectory, options: options)
+        try ensureRPath(executableURL: executableDestination, rpath: "@executable_path/../Frameworks", options: options)
 
         let infoPlistPath = spec.infoPlist.flatMap { absolutePath(for: $0, relativeTo: packageDirectory) }
         if let infoPlistPath {
@@ -555,4 +556,25 @@ func removeExistingSignatures(at root: URL, options: Options) throws {
             purgeSignature(at: item)
         }
     }
+}
+
+// Ensure the executable has an rpath to bundled Frameworks so copied frameworks resolve.
+private func ensureRPath(executableURL: URL, rpath: String, options: Options) throws {
+    let otool = try runProcess(
+        arguments: ["otool", "-l", executableURL.path],
+        workingDirectory: executableURL.deletingLastPathComponent(),
+        options: options
+    )
+
+    if otool.output.contains("LC_RPATH") && otool.output.contains("path \(rpath)") {
+        log("Executable already has rpath \(rpath)", verboseOnly: true, options: options)
+        return
+    }
+
+    log("Adding rpath \(rpath) to \(executableURL.lastPathComponent)", verboseOnly: true, options: options)
+    _ = try runProcess(
+        arguments: ["install_name_tool", "-add_rpath", rpath, executableURL.path],
+        workingDirectory: executableURL.deletingLastPathComponent(),
+        options: options
+    )
 }
