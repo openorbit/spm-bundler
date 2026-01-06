@@ -189,6 +189,9 @@ struct BundlerCore {
             return
         }
 
+        // Clean up any stale signatures so ad-hoc signing with --deep can succeed.
+        try removeExistingSignatures(at: path, options: options)
+
         log("Signing \(path.lastPathComponent) with identity \(identity)", verboseOnly: false, options: options)
         var args = ["codesign", "--force", "--sign", identity]
         if let entitlements = signing.entitlements {
@@ -528,4 +531,28 @@ func log(_ message: String, verboseOnly: Bool, options: Options) {
         guard options.verbose else { return }
     }
     print("[spm-bundler] \(message)")
+}
+
+/// Remove existing code signature artifacts to avoid "replacing existing signature" errors
+/// when re-signing (common with ad-hoc + --deep).
+func removeExistingSignatures(at root: URL, options: Options) throws {
+    let fm = FileManager.default
+    let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey]
+    let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
+
+    func purgeSignature(at url: URL) {
+        do {
+            try fm.removeItem(at: url)
+            log("Removed existing signature at \(url.path)", verboseOnly: true, options: options)
+        } catch {
+            log("Failed to remove existing signature at \(url.path): \(error)", verboseOnly: true, options: options)
+        }
+    }
+
+    while let item = enumerator?.nextObject() as? URL {
+        let last = item.lastPathComponent
+        if last == "_CodeSignature" || last == "CodeResources" || last == "embedded.provisionprofile" {
+            purgeSignature(at: item)
+        }
+    }
 }
