@@ -1,0 +1,53 @@
+{
+  "configuration": "release",
+  "outputDirectory": "Bundles",
+  "bundles": [
+    {
+      "name": "SampleMacApp",
+      "product": "YourExecutableProduct",
+      "platform": "macos",
+      "bundleIdentifier": "com.example.macapp",
+      "version": "1.0.0",
+      "minimumSystemVersion": "12.0",
+      "resources": [
+        "Resources/AppAssets"
+      ],
+      "frameworks": [
+        ".build/release/YourFramework.framework"
+      ],
+      "signing": {
+        "enabled": true,
+        "identity": "Developer ID Application: Your Name (TEAMID)",
+        "entitlements": "Signing/macOS.entitlements",
+        "options": [
+          "runtime"
+        ],
+        "deep": true
+      }
+    },
+    {
+      "name": "SampleIOSApp",
+      "product": "YourIOSExecutable",
+      "platform": "ios",
+      "bundleIdentifier": "com.example.iosapp",
+      "version": "1.0.0",
+      "minimumSystemVersion": "17.0",
+      "binaryPath": "DerivedData/Build/Products/Release-iphoneos/YourIOSExecutable",
+      "resources": [
+        "Resources/Shared"
+      ],
+      "frameworks": [
+        "Frameworks/ThirdParty.framework"
+      ],
+      "signing": {
+        "enabled": true,
+        "identity": "Apple Distribution: Your Name (TEAMID)",
+        "entitlements": "Signing/iOS.entitlements",
+        "options": [
+          "runtime"
+        ],
+        "deep": true
+      }
+    }
+  ]
+}

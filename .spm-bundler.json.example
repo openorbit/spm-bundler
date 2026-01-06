@@ -1,0 +1,17 @@
+{
+  "bundleName": "MyApp",
+  "bundleIdentifier": "com.example.myapp",
+  "executableName": "MyAppExecutable",
+  "executablePath": "./.build/debug/MyAppExecutable",
+  "frameworks": [
+    "./Frameworks/MyFramework.framework"
+  ],
+  "resources": [
+    "Assets.xcassets",
+    "Resources/Localizable.strings"
+  ],
+  "signingIdentity": "Developer ID Application: Your Name (TEAMID)",
+  "entitlementsPath": "entitlements.plist",
+  "outputPath": "build/MyApp.app",
+  "version": "1.0"
+}
