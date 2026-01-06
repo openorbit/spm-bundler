@@ -301,6 +301,28 @@ struct BundlerCore {
         }
     }
 
+    // Ensure the framework's install name points to @rpath so it resolves from the bundled Frameworks directory.
+    private func setFrameworkInstallName(frameworkURL: URL, options: Options) throws {
+        let frameworkName = frameworkURL.deletingPathExtension().lastPathComponent
+        let binary = frameworkURL
+            .appendingPathComponent("Versions")
+            .appendingPathComponent("A")
+            .appendingPathComponent(frameworkName)
+
+        guard FileManager.default.fileExists(atPath: binary.path) else {
+            log("Framework binary missing at \(binary.path); skipping install_name_tool", verboseOnly: true, options: options)
+            return
+        }
+
+        let newID = "@rpath/\(frameworkURL.lastPathComponent)/Versions/A/\(frameworkName)"
+        log("Setting install_name for \(frameworkName) to \(newID)", verboseOnly: true, options: options)
+        _ = try runProcess(
+            arguments: ["install_name_tool", "-id", newID, binary.path],
+            workingDirectory: frameworkURL,
+            options: options
+        )
+    }
+
     private func copyResources(
         _ resources: [String]?,
         to destination: URL,
@@ -635,26 +657,4 @@ private func resolveFrameworkPath(_ path: String, packageDirectory: URL, buildOu
     }
 
     return direct
-}
-
-// Ensure the framework's install name points to @rpath so it resolves from the bundled Frameworks directory.
-private func setFrameworkInstallName(frameworkURL: URL, options: Options) throws {
-    let frameworkName = frameworkURL.deletingPathExtension().lastPathComponent
-    let binary = frameworkURL
-        .appendingPathComponent("Versions")
-        .appendingPathComponent("A")
-        .appendingPathComponent(frameworkName)
-
-    guard FileManager.default.fileExists(atPath: binary.path) else {
-        log("Framework binary missing at \(binary.path); skipping install_name_tool", verboseOnly: true, options: options)
-        return
-    }
-
-    let newID = "@rpath/\(frameworkURL.lastPathComponent)/Versions/A/\(frameworkName)"
-    log("Setting install_name for \(frameworkName) to \(newID)", verboseOnly: true, options: options)
-    _ = try runProcess(
-        arguments: ["install_name_tool", "-id", newID, binary.path],
-        workingDirectory: frameworkURL,
-        options: options
-    )
 }
