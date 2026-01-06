@@ -199,7 +199,7 @@ struct BundlerCore {
         } else {
             args += ["--options", "runtime"]
         }
-        if signing.deep {
+        if signing.deep ?? false {
             args.append("--deep")
         }
         args.append(path.path)
