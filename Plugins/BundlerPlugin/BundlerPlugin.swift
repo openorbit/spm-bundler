@@ -198,7 +198,7 @@ struct BundlerCore {
         // Clean up any stale signatures so ad-hoc signing with --deep can succeed.
         try removeExistingSignatures(at: path, options: options)
 
-        log("Signing \(path.lastPathComponent) with identity \(identity)", verboseOnly: false, options: options)
+        log("Signing \(path.lastPathComponent) with identity \(identity) deep: \(signing.deep ?? false)", verboseOnly: false, options: options)
         var args = ["codesign", "--force", "--sign", identity]
         if let entitlements = signing.entitlements {
             args += ["--entitlements", entitlements]
