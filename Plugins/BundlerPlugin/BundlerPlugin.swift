@@ -209,19 +209,12 @@ struct BundlerCore {
         try removeExistingSignatures(at: path, options: options)
 
         log("Signing \(path.lastPathComponent) with identity \(identity) deep: \(signing.deep ?? false)", verboseOnly: false, options: options)
-        var args = ["codesign", "--force", "--sign", identity]
-        if let entitlements = signing.entitlements {
-            args += ["--entitlements", entitlements]
-        }
-        if let opts = signing.options, !opts.isEmpty {
-            args += ["--options", opts.joined(separator: ",")]
-        } else {
-            args += ["--options", "runtime"]
-        }
-        if signing.deep ?? false {
-            args.append("--deep")
-        }
-        args.append(path.path)
+        let args = buildCodesignArgs(identity: identity,
+                                     entitlements: signing.entitlements,
+                                     optionsFlags: signing.options,
+                                     deep: signing.deep ?? false,
+                                     targetPath: path.path)
+
         try runProcess(arguments: args, workingDirectory: path.deletingLastPathComponent(), options: options)
     }
 
@@ -303,13 +296,22 @@ struct BundlerCore {
         options: Options
     ) throws {
         guard let frameworks, !frameworks.isEmpty else { return }
+        let signingEnabled = signing?.isEnabled ?? false
+        let identity = signing?.identity
         for framework in frameworks {
             let source = resolveFrameworkPath(framework, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory)
             let target = destination.appendingPathComponent(source.lastPathComponent)
             try copyReplacingItem(at: source, to: target)
             try setFrameworkInstallName(frameworkURL: target, options: options)
-            // Strip any existing signatures; final app signing with --deep will re-sign nested frameworks.
-            if (signing?.isEnabled ?? false) {
+            if signingEnabled, let identity, !identity.isEmpty {
+                try signFramework(at: target,
+                                  identity: identity,
+                                  entitlements: signing?.entitlements,
+                                  optionsFlags: signing?.options,
+                                  deep: signing?.deep ?? false,
+                                  options: options)
+            } else if signingEnabled {
+                // Still strip stale signatures so app-level signing can succeed.
                 try removeExistingSignatures(at: target, options: options)
                 _ = try? runProcess(arguments: ["codesign", "--remove-signature", target.path],
                                     workingDirectory: target.deletingLastPathComponent(),
@@ -339,6 +341,40 @@ struct BundlerCore {
             workingDirectory: frameworkURL,
             options: options
         )
+    }
+
+    /// Sign a copied framework so dyld will accept it after install_name_tool changes.
+    private func signFramework(at path: URL, identity: String, entitlements: String?, optionsFlags: [String]?, deep: Bool, options: Options) throws {
+        // Frameworks may arrive pre-signed; strip old signatures so we can re-sign cleanly.
+        try removeExistingSignatures(at: path, options: options)
+        _ = try? runProcess(arguments: ["codesign", "--remove-signature", path.path],
+                            workingDirectory: path.deletingLastPathComponent(),
+                            options: options)
+
+        let args = buildCodesignArgs(identity: identity,
+                                     entitlements: entitlements,
+                                     optionsFlags: optionsFlags,
+                                     deep: deep,
+                                     targetPath: path.path)
+        log("Signing framework \(path.lastPathComponent) with identity \(identity)", verboseOnly: true, options: options)
+        try runProcess(arguments: args, workingDirectory: path.deletingLastPathComponent(), options: options)
+    }
+
+    /// Construct codesign arguments; skip runtime hardening for ad-hoc unless explicitly provided.
+    private func buildCodesignArgs(identity: String, entitlements: String?, optionsFlags: [String]?, deep: Bool, targetPath: String) -> [String] {
+        var args: [String] = ["codesign", "--force", "--sign", identity]
+        if let entitlements {
+            args += ["--entitlements", entitlements]
+        }
+        if let opts = optionsFlags, !opts.isEmpty {
+            args += ["--options", opts.joined(separator: ",")]
+        } else if identity != "-" {
+            // Ad-hoc signing uses identity "-", which cannot be combined with runtime hardening.
+            args += ["--options", "runtime"]
+        }
+        if deep { args.append("--deep") }
+        args.append(targetPath)
+        return args
     }
 
     private func copyResources(
