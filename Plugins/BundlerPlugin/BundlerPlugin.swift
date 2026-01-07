@@ -138,14 +138,30 @@ struct BundlerCore {
         try copyReplacingItem(at: executableURL, to: executableDestination)
         try makeExecutable(at: executableDestination)
 
-        try copyFrameworks(spec.frameworks,
-                           to: frameworksDir,
-                           packageDirectory: packageDirectory,
-                           buildOutputDirectory: buildOutputDirectory,
-                           signing: spec.signing,
-                           options: options)
+        let resolvedDependencies = try resolveBundledDependencies(
+            spec: spec,
+            executableURL: executableURL,
+            packageDirectory: packageDirectory,
+            buildOutputDirectory: buildOutputDirectory,
+            options: options
+        )
+
+        let copiedFrameworks = try copyFrameworks(resolvedDependencies.frameworks,
+                                                  to: frameworksDir,
+                                                  signing: spec.signing,
+                                                  options: options)
+        let copiedDylibs = try copyDylibs(resolvedDependencies.dylibs,
+                                          to: frameworksDir,
+                                          signing: spec.signing,
+                                          options: options)
         try copyResources(spec.resources, to: resourcesDir, packageDirectory: packageDirectory, options: options)
         try ensureRPath(executableURL: executableDestination, rpath: "@executable_path/../Frameworks", options: options)
+        try rewriteBundledDependencies(
+            executableURL: executableDestination,
+            frameworkURLs: copiedFrameworks,
+            dylibURLs: copiedDylibs,
+            options: options
+        )
 
         let infoPlistPath = spec.infoPlist.flatMap { absolutePath(for: $0, relativeTo: packageDirectory) }
         if let infoPlistPath {
@@ -178,13 +194,29 @@ struct BundlerCore {
         try copyReplacingItem(at: executableURL, to: executableDestination)
         try makeExecutable(at: executableDestination)
 
-        try copyFrameworks(spec.frameworks,
-                           to: frameworksDir,
-                           packageDirectory: packageDirectory,
-                           buildOutputDirectory: buildOutputDirectory,
-                           signing: spec.signing,
-                           options: options)
+        let resolvedDependencies = try resolveBundledDependencies(
+            spec: spec,
+            executableURL: executableURL,
+            packageDirectory: packageDirectory,
+            buildOutputDirectory: buildOutputDirectory,
+            options: options
+        )
+
+        let copiedFrameworks = try copyFrameworks(resolvedDependencies.frameworks,
+                                                  to: frameworksDir,
+                                                  signing: spec.signing,
+                                                  options: options)
+        let copiedDylibs = try copyDylibs(resolvedDependencies.dylibs,
+                                          to: frameworksDir,
+                                          signing: spec.signing,
+                                          options: options)
         try copyResources(spec.resources, to: resourcesDir, packageDirectory: packageDirectory, options: options)
+        try rewriteBundledDependencies(
+            executableURL: executableDestination,
+            frameworkURLs: copiedFrameworks,
+            dylibURLs: copiedDylibs,
+            options: options
+        )
 
         let infoPlistPath = spec.infoPlist.flatMap { absolutePath(for: $0, relativeTo: packageDirectory) }
         if let infoPlistPath {
@@ -287,21 +319,53 @@ struct BundlerCore {
         return ResolvedBinary(url: binary, buildOutputDirectory: binDir)
     }
 
-    private func copyFrameworks(
-        _ frameworks: [String]?,
-        to destination: URL,
+    private func resolveBundledDependencies(
+        spec: BundleSpec,
+        executableURL: URL,
         packageDirectory: URL,
         buildOutputDirectory: URL?,
+        options: Options
+    ) throws -> ResolvedDependencies {
+        let discovered = try discoverDependencies(
+            executableURL: executableURL,
+            packageDirectory: packageDirectory,
+            buildOutputDirectory: buildOutputDirectory,
+            options: options
+        )
+
+        let frameworks: [URL]
+        if let provided = spec.frameworks {
+            frameworks = provided.map { resolveFrameworkPath($0, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory) }
+        } else {
+            frameworks = discovered.frameworks
+        }
+
+        let dylibs: [URL]
+        if let provided = spec.dylibs {
+            dylibs = provided.map { resolveDylibPath($0, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory) }
+        } else {
+            dylibs = discovered.dylibs
+        }
+
+        return ResolvedDependencies(
+            frameworks: uniqueURLs(frameworks),
+            dylibs: uniqueURLs(dylibs)
+        )
+    }
+
+    private func copyFrameworks(
+        _ frameworks: [URL],
+        to destination: URL,
         signing: SigningConfig?,
         options: Options
-    ) throws {
-        guard let frameworks, !frameworks.isEmpty else { return }
+    ) throws -> [URL] {
+        guard !frameworks.isEmpty else { return [] }
         let signingEnabled = signing?.isEnabled ?? false
         let identity = signing?.identity
+        var copied: [URL] = []
         for framework in frameworks {
-            let source = resolveFrameworkPath(framework, packageDirectory: packageDirectory, buildOutputDirectory: buildOutputDirectory)
-            let target = destination.appendingPathComponent(source.lastPathComponent)
-            try copyReplacingItem(at: source, to: target)
+            let target = destination.appendingPathComponent(framework.lastPathComponent)
+            try copyReplacingItem(at: framework, to: target)
             try setFrameworkInstallName(frameworkURL: target, options: options)
             if signingEnabled, let identity, !identity.isEmpty {
                 try signFramework(at: target,
@@ -317,8 +381,44 @@ struct BundlerCore {
                                     workingDirectory: target.deletingLastPathComponent(),
                                     options: options)
             }
-            log("Copied framework \(source.lastPathComponent)", verboseOnly: true, options: options)
+            copied.append(target)
+            log("Copied framework \(framework.lastPathComponent)", verboseOnly: true, options: options)
         }
+        return copied
+    }
+
+    private func copyDylibs(
+        _ dylibs: [URL],
+        to destination: URL,
+        signing: SigningConfig?,
+        options: Options
+    ) throws -> [URL] {
+        guard !dylibs.isEmpty else { return [] }
+        let signingEnabled = signing?.isEnabled ?? false
+        let identity = signing?.identity
+        var copied: [URL] = []
+        for dylib in dylibs {
+            let target = destination.appendingPathComponent(dylib.lastPathComponent)
+            try copyReplacingItem(at: dylib, to: target)
+            try setDylibInstallName(dylibURL: target, options: options)
+            if signingEnabled, let identity, !identity.isEmpty {
+                try signDylib(at: target,
+                              identity: identity,
+                              entitlements: signing?.entitlements,
+                              optionsFlags: signing?.options,
+                              deep: signing?.deep ?? false,
+                              options: options)
+            } else if signingEnabled {
+                // Still strip stale signatures so app-level signing can succeed.
+                try removeExistingSignatures(at: target, options: options)
+                _ = try? runProcess(arguments: ["codesign", "--remove-signature", target.path],
+                                    workingDirectory: target.deletingLastPathComponent(),
+                                    options: options)
+            }
+            copied.append(target)
+            log("Copied dylib \(dylib.lastPathComponent)", verboseOnly: true, options: options)
+        }
+        return copied
     }
 
     // Ensure the framework's install name points to @rpath so it resolves from the bundled Frameworks directory.
@@ -357,6 +457,22 @@ struct BundlerCore {
                                      deep: deep,
                                      targetPath: path.path)
         log("Signing framework \(path.lastPathComponent) with identity \(identity)", verboseOnly: true, options: options)
+        try runProcess(arguments: args, workingDirectory: path.deletingLastPathComponent(), options: options)
+    }
+
+    /// Sign a copied dylib so dyld will accept it after install_name_tool changes.
+    private func signDylib(at path: URL, identity: String, entitlements: String?, optionsFlags: [String]?, deep: Bool, options: Options) throws {
+        try removeExistingSignatures(at: path, options: options)
+        _ = try? runProcess(arguments: ["codesign", "--remove-signature", path.path],
+                            workingDirectory: path.deletingLastPathComponent(),
+                            options: options)
+
+        let args = buildCodesignArgs(identity: identity,
+                                     entitlements: entitlements,
+                                     optionsFlags: optionsFlags,
+                                     deep: deep,
+                                     targetPath: path.path)
+        log("Signing dylib \(path.lastPathComponent) with identity \(identity)", verboseOnly: true, options: options)
         try runProcess(arguments: args, workingDirectory: path.deletingLastPathComponent(), options: options)
     }
 
@@ -411,6 +527,319 @@ struct BundlerCore {
             workingDirectory: executableURL.deletingLastPathComponent(),
             options: options
         )
+    }
+
+    private func discoverDependencies(
+        executableURL: URL,
+        packageDirectory: URL,
+        buildOutputDirectory: URL?,
+        options: Options
+    ) throws -> ResolvedDependencies {
+        var discoveredFrameworks: [URL] = []
+        var discoveredDylibs: [URL] = []
+        var queuedBinaries: [URL] = [executableURL]
+        var visitedBinaries: Set<String> = []
+        var seenFrameworks: Set<String> = []
+        var seenDylibs: Set<String> = []
+
+        while let current = queuedBinaries.first {
+            queuedBinaries.removeFirst()
+            if !visitedBinaries.insert(current.path).inserted { continue }
+
+            let deps = try otoolDependencies(for: current, options: options)
+            for dep in deps where !isSystemDependency(dep) {
+                if let frameworkName = frameworkName(from: dep),
+                   let resolved = resolveFrameworkDependency(
+                       dependency: dep,
+                       name: frameworkName,
+                       origin: current,
+                       packageDirectory: packageDirectory,
+                       buildOutputDirectory: buildOutputDirectory
+                   ) {
+                    if seenFrameworks.insert(resolved.path).inserted {
+                        discoveredFrameworks.append(resolved)
+                        if let frameworkBinary = frameworkBinaryURL(frameworkURL: resolved) {
+                            queuedBinaries.append(frameworkBinary)
+                        }
+                    }
+                } else if let dylibName = dylibName(from: dep),
+                          let resolved = resolveDylibDependency(
+                              dependency: dep,
+                              name: dylibName,
+                              origin: current,
+                              packageDirectory: packageDirectory,
+                              buildOutputDirectory: buildOutputDirectory
+                          ) {
+                    if seenDylibs.insert(resolved.path).inserted {
+                        discoveredDylibs.append(resolved)
+                        queuedBinaries.append(resolved)
+                    }
+                }
+            }
+        }
+
+        return ResolvedDependencies(
+            frameworks: discoveredFrameworks,
+            dylibs: discoveredDylibs
+        )
+    }
+
+    private func otoolDependencies(for binary: URL, options: Options) throws -> [String] {
+        let result = try runProcess(
+            arguments: ["otool", "-L", binary.path],
+            workingDirectory: binary.deletingLastPathComponent(),
+            options: options
+        )
+        return parseOtoolDependencies(result.output)
+    }
+
+    private func parseOtoolDependencies(_ output: String) -> [String] {
+        let lines = output.split(separator: "\n")
+        guard lines.count > 1 else { return [] }
+        var deps: [String] = []
+        for line in lines.dropFirst() {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let first = trimmed.split(separator: " ").first {
+                deps.append(String(first))
+            }
+        }
+        return deps
+    }
+
+    private func isSystemDependency(_ path: String) -> Bool {
+        return path.hasPrefix("/System/Library/") || path.hasPrefix("/usr/lib/")
+    }
+
+    private func frameworkName(from dependency: String) -> String? {
+        let components = dependency.split(separator: "/")
+        guard let frameworkComponent = components.first(where: { $0.hasSuffix(".framework") }) else { return nil }
+        return String(frameworkComponent.dropLast(".framework".count))
+    }
+
+    private func dylibName(from dependency: String) -> String? {
+        return dependency.hasSuffix(".dylib") ? URL(fileURLWithPath: dependency).lastPathComponent : nil
+    }
+
+    private func resolveFrameworkDependency(
+        dependency: String,
+        name: String,
+        origin: URL,
+        packageDirectory: URL,
+        buildOutputDirectory: URL?
+    ) -> URL? {
+        if let resolved = resolveSpecialDependencyPath(dependency, origin: origin),
+           let frameworkRoot = frameworkRoot(from: resolved.path) {
+            if FileManager.default.fileExists(atPath: frameworkRoot.path) {
+                return frameworkRoot
+            }
+        }
+
+        if dependency.hasPrefix("@rpath") || dependency.hasPrefix("@loader_path") || dependency.hasPrefix("@executable_path") {
+            let frameworkBundleName = "\(name).framework"
+            return resolveFrameworkBySearching(
+                frameworkBundleName,
+                packageDirectory: packageDirectory,
+                buildOutputDirectory: buildOutputDirectory
+            )
+        }
+
+        if dependency.hasPrefix("/") {
+            if let frameworkRoot = frameworkRoot(from: dependency) {
+                return FileManager.default.fileExists(atPath: frameworkRoot.path) ? frameworkRoot : nil
+            }
+        }
+
+        return nil
+    }
+
+    private func resolveDylibDependency(
+        dependency: String,
+        name: String,
+        origin: URL,
+        packageDirectory: URL,
+        buildOutputDirectory: URL?
+    ) -> URL? {
+        if let resolved = resolveSpecialDependencyPath(dependency, origin: origin) {
+            if FileManager.default.fileExists(atPath: resolved.path) {
+                return resolved
+            }
+        }
+
+        if dependency.hasPrefix("@rpath") || dependency.hasPrefix("@loader_path") || dependency.hasPrefix("@executable_path") {
+            return resolveDylibBySearching(
+                name,
+                packageDirectory: packageDirectory,
+                buildOutputDirectory: buildOutputDirectory
+            )
+        }
+
+        if dependency.hasPrefix("/") {
+            let absolute = URL(fileURLWithPath: dependency)
+            return FileManager.default.fileExists(atPath: absolute.path) ? absolute : nil
+        }
+
+        return nil
+    }
+
+    private func resolveSpecialDependencyPath(_ dependency: String, origin: URL) -> URL? {
+        if dependency.hasPrefix("@loader_path") {
+            let suffix = String(dependency.dropFirst("@loader_path".count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return origin.deletingLastPathComponent().appendingPathComponent(suffix).standardizedFileURL
+        }
+        if dependency.hasPrefix("@executable_path") {
+            let suffix = String(dependency.dropFirst("@executable_path".count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return origin.deletingLastPathComponent().appendingPathComponent(suffix).standardizedFileURL
+        }
+        if dependency.hasPrefix("@rpath") {
+            return nil
+        }
+        if dependency.hasPrefix("/") {
+            return URL(fileURLWithPath: dependency)
+        }
+        return origin.deletingLastPathComponent().appendingPathComponent(dependency).standardizedFileURL
+    }
+
+    private func resolveFrameworkBySearching(
+        _ frameworkBundleName: String,
+        packageDirectory: URL,
+        buildOutputDirectory: URL?
+    ) -> URL? {
+        let roots = [buildOutputDirectory, packageDirectory].compactMap { $0 }
+        for root in roots {
+            let direct = root.appendingPathComponent(frameworkBundleName)
+            if FileManager.default.fileExists(atPath: direct.path) {
+                return direct
+            }
+            let inFrameworks = root.appendingPathComponent("Frameworks").appendingPathComponent(frameworkBundleName)
+            if FileManager.default.fileExists(atPath: inFrameworks.path) {
+                return inFrameworks
+            }
+        }
+        return findDependency(named: frameworkBundleName, in: roots, wantsDirectory: true)
+    }
+
+    private func resolveDylibBySearching(
+        _ dylibName: String,
+        packageDirectory: URL,
+        buildOutputDirectory: URL?
+    ) -> URL? {
+        let roots = [buildOutputDirectory, packageDirectory].compactMap { $0 }
+        for root in roots {
+            let direct = root.appendingPathComponent(dylibName)
+            if FileManager.default.fileExists(atPath: direct.path) {
+                return direct
+            }
+            let inFrameworks = root.appendingPathComponent("Frameworks").appendingPathComponent(dylibName)
+            if FileManager.default.fileExists(atPath: inFrameworks.path) {
+                return inFrameworks
+            }
+        }
+        return findDependency(named: dylibName, in: roots, wantsDirectory: false)
+    }
+
+    private func findDependency(named name: String, in roots: [URL], wantsDirectory: Bool) -> URL? {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.isDirectoryKey]
+        for root in roots {
+            guard fm.fileExists(atPath: root.path) else { continue }
+            if let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) {
+                for case let url as URL in enumerator {
+                    guard url.lastPathComponent == name else { continue }
+                    if let isDirectory = try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory {
+                        if isDirectory == wantsDirectory {
+                            return url
+                        }
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func uniqueURLs(_ urls: [URL]) -> [URL] {
+        var seen: Set<String> = []
+        var result: [URL] = []
+        for url in urls {
+            if seen.insert(url.path).inserted {
+                result.append(url)
+            }
+        }
+        return result
+    }
+
+    private func frameworkRoot(from path: String) -> URL? {
+        guard let range = path.range(of: ".framework") else { return nil }
+        let prefix = String(path[..<range.upperBound])
+        return URL(fileURLWithPath: prefix)
+    }
+
+    private func frameworkBinaryURL(frameworkURL: URL) -> URL? {
+        let frameworkName = frameworkURL.deletingPathExtension().lastPathComponent
+        let binary = frameworkURL
+            .appendingPathComponent("Versions")
+            .appendingPathComponent("A")
+            .appendingPathComponent(frameworkName)
+        return FileManager.default.fileExists(atPath: binary.path) ? binary : nil
+    }
+
+    private func setDylibInstallName(dylibURL: URL, options: Options) throws {
+        let newID = "@rpath/\(dylibURL.lastPathComponent)"
+        log("Setting install_name for \(dylibURL.lastPathComponent) to \(newID)", verboseOnly: true, options: options)
+        _ = try runProcess(
+            arguments: ["install_name_tool", "-id", newID, dylibURL.path],
+            workingDirectory: dylibURL.deletingLastPathComponent(),
+            options: options
+        )
+    }
+
+    private func rewriteBundledDependencies(
+        executableURL: URL,
+        frameworkURLs: [URL],
+        dylibURLs: [URL],
+        options: Options
+    ) throws {
+        guard !frameworkURLs.isEmpty || !dylibURLs.isEmpty else { return }
+
+        var frameworkIDs: [String: String] = [:]
+        for framework in frameworkURLs {
+            let name = framework.deletingPathExtension().lastPathComponent
+            frameworkIDs[name] = "@rpath/\(framework.lastPathComponent)/Versions/A/\(name)"
+        }
+
+        var dylibIDs: [String: String] = [:]
+        for dylib in dylibURLs {
+            dylibIDs[dylib.lastPathComponent] = "@rpath/\(dylib.lastPathComponent)"
+        }
+
+        var binariesToFix: [URL] = [executableURL]
+        binariesToFix += frameworkURLs.compactMap { frameworkBinaryURL(frameworkURL: $0) }
+        binariesToFix += dylibURLs
+
+        for binary in binariesToFix {
+            let deps = try otoolDependencies(for: binary, options: options)
+            for dep in deps {
+                if let frameworkName = frameworkName(from: dep),
+                   let newID = frameworkIDs[frameworkName],
+                   dep != newID {
+                    log("Rewriting \(binary.lastPathComponent) dependency \(dep) -> \(newID)", verboseOnly: true, options: options)
+                    _ = try runProcess(
+                        arguments: ["install_name_tool", "-change", dep, newID, binary.path],
+                        workingDirectory: binary.deletingLastPathComponent(),
+                        options: options
+                    )
+                } else if let dylibName = dylibName(from: dep),
+                          let newID = dylibIDs[dylibName],
+                          dep != newID {
+                    log("Rewriting \(binary.lastPathComponent) dependency \(dep) -> \(newID)", verboseOnly: true, options: options)
+                    _ = try runProcess(
+                        arguments: ["install_name_tool", "-change", dep, newID, binary.path],
+                        workingDirectory: binary.deletingLastPathComponent(),
+                        options: options
+                    )
+                }
+            }
+        }
     }
 
     @discardableResult
@@ -479,6 +908,7 @@ struct BundleSpec: Decodable {
     var infoPlist: String?
     var resources: [String]?
     var frameworks: [String]?
+    var dylibs: [String]?
     var binaryPath: String?
     var signing: SigningConfig?
 
@@ -551,6 +981,11 @@ struct ProcessResult {
 struct ResolvedBinary {
     var url: URL
     var buildOutputDirectory: URL?
+}
+
+struct ResolvedDependencies {
+    var frameworks: [URL]
+    var dylibs: [URL]
 }
 
 enum BundlerError: Error, CustomStringConvertible {
@@ -697,6 +1132,47 @@ private func resolveFrameworkPath(_ path: String, packageDirectory: URL, buildOu
             }
         }
         // If suffix starts with the config (e.g., "release/Framework.framework"), try triple/config/suffixWithoutConfig
+        if suffix.hasPrefix("\(configDir)/") {
+            let remainder = String(suffix.dropFirst(configDir.count + 1))
+            let candidate = packageDirectory
+                .appendingPathComponent(".build")
+                .appendingPathComponent(tripleDir)
+                .appendingPathComponent(configDir)
+                .appendingPathComponent(remainder)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+    }
+
+    return direct
+}
+
+// Resolve a dylib path, inserting the build triple directory if needed.
+private func resolveDylibPath(_ path: String, packageDirectory: URL, buildOutputDirectory: URL?) -> URL {
+    let direct = absolutePath(for: path, relativeTo: packageDirectory)
+    if FileManager.default.fileExists(atPath: direct.path) {
+        return direct
+    }
+
+    guard let buildOutputDirectory else { return direct }
+
+    let binDir = buildOutputDirectory
+    let configDir = binDir.lastPathComponent // e.g., release
+    let tripleDir = binDir.deletingLastPathComponent().lastPathComponent // e.g., arm64-apple-macosx
+
+    let relative = path.hasPrefix("/") ? String(path.dropFirst()) : path
+    if relative.hasPrefix(".build/") {
+        let suffix = String(relative.dropFirst(".build/".count))
+        if !suffix.hasPrefix("\(tripleDir)/") {
+            let candidate = packageDirectory
+                .appendingPathComponent(".build")
+                .appendingPathComponent(tripleDir)
+                .appendingPathComponent(suffix)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
         if suffix.hasPrefix("\(configDir)/") {
             let remainder = String(suffix.dropFirst(configDir.count + 1))
             let candidate = packageDirectory

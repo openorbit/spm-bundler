@@ -15,6 +15,9 @@
       "frameworks": [
         ".build/release/YourFramework.framework"
       ],
+      "dylibs": [
+        ".build/release/libYourDependency.dylib"
+      ],
       "signing": {
         "enabled": true,
         "identity": "Developer ID Application: Your Name (TEAMID)",

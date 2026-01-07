@@ -6,7 +6,7 @@ SwiftPM command plugin for assembling macOS/iOS `.app` bundles from Swift packag
 
 - Create a config at `.spm-bundler.json` (or pass `--config path/to/config.json`). See `spm-bundler.json.example` for a starting point.
 - Run the plugin: `swift package --allow-writing-to-package-directory bundle [--configuration release] [--output Bundles] [--verbose] [--skip-sign]`
-  - The plugin builds the listed products (unless `binaryPath` is provided), copies resources/frameworks, writes an `Info.plist` (or uses yours), and optionally codesigns.
+  - The plugin builds the listed products (unless `binaryPath` is provided), copies resources/frameworks/dylibs, writes an `Info.plist` (or uses yours), and optionally codesigns.
   - Output defaults to `Bundles/<Name>.app` under the package root.
 
 ## Configuration schema
@@ -26,7 +26,8 @@ Bundle fields:
 - `displayName` (optional): overrides the name shown in the plist.
 - `infoPlist` (optional): path to an existing plist to copy instead of the generated one.
 - `resources` (optional): file/directory paths copied into `Resources` (macOS) or the app root/Resources (iOS).
-- `frameworks` (optional): file/directory paths copied into `Frameworks`.
+- `frameworks` (optional): explicit file/directory paths copied into `Frameworks`. If omitted, non-system frameworks are auto-discovered from `otool -L`. Use `[]` to disable.
+- `dylibs` (optional): explicit `.dylib` paths copied into `Frameworks`. If omitted, non-system dylibs are auto-discovered from `otool -L`. Use `[]` to disable.
 - `binaryPath` (optional): explicit path to a prebuilt binary (useful for iOS/xcconfigs). Otherwise `swift build --product` is invoked.
 - `signing` (optional):
   - `enabled` (default `true`), `identity`, `entitlements`, `options` (array passed to `codesign --options`, default `runtime`), `deep` (adds `--deep`).
@@ -34,7 +35,7 @@ Bundle fields:
 ## Signing notes
 
 - Codesigning is skipped if `signing.enabled` is false, `identity` is empty, or `--skip-sign` is supplied.
-- Frameworks/resources are copied as-is; provide pre-signed frameworks if required by your workflow.
+- Frameworks/dylibs/resources are copied into the bundle and re-written to load from `@rpath` when bundled.
 
 ## Ad-hoc / local signing
 
